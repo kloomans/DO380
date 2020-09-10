@@ -1,0 +1,436 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-certificates-review - lab script for DO380-OCP4
+#
+# SYNOPSIS
+#     lab-certificates-review {start|grade|finish}
+#
+#        start  - prepare the system for starting the lab
+#        grade  - perform evaluation steps on the system
+#        finish - perform post-lab finish
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start or finish for:
+#     Lab: Configuring Trusted TLS Certificates
+#
+# CHANGELOG
+#   * Wed Jul 29 Michael Phillips <miphilli@redhat.com>
+#   - added the ocp4_login_as_admin function after the ocp4_is_cluster_up function
+#   * Wed Jul 01 Michael Phillips <miphilli@redhat.com>
+#   - changed the DESCRIPTION and the exercise "title" variable.
+#   * Wed Jun 09 Michael Phillips <miphilli@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/root/bin:/usr/local/bin
+declare -a valid_commands=(start grade finish)
+
+# Change these variables to match your exercise
+this='certificates-review'
+title='Lab: Configuring Trusted TLS Certificates'
+playbook_dir="/usr/local/lib/ansible"
+cert_name="review"
+combined_name="review-combined"
+grading_dir="/tmp/grading"
+
+# Do not change these variables
+target='workstation'
+run_as_root='true'
+
+source /etc/rht
+
+function lab_start {
+
+  ocp4_print_prereq_header
+
+  ocp4_is_cluster_up
+  ocp4_login_as_admin
+  print_line
+  ocp4_exit_on_failure
+
+  ocp4_print_setup_header
+
+  print_line " Preparing the student's cluster:"
+  ocp4_grab_lab_files "no-solution"
+  deploy_ansible
+
+  local SECRET_NAME="$(oc get ingresscontrollers.operator.openshift.io/default -n openshift-ingress-operator -o jsonpath='{.spec.defaultCertificate.name}')"
+  local CONFIGMAP_NAME="$(oc get proxy/cluster -o jsonpath='{.spec.trustedCA.name}')"
+  local API_SECRET_NAME="$(oc get apiserver/cluster -o jsonpath='{.spec.servingCerts.namedCertificates[0].servingCertificate.name}')"
+
+  if [ -n "${SECRET_NAME}" ]
+  then
+    pad2 "Reverting the default ingress controller operator"
+    if oc patch ingresscontroller.operator/default --type=merge --patch='{"spec":{"defaultCertificate":null}}' -n openshift-ingress-operator
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad2 "Deleting the '${SECRET_NAME}' secret"
+    if oc delete secret ${SECRET_NAME} -n openshift-ingress
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if [ -n "${CONFIGMAP_NAME}" ]
+  then
+    pad2 "Reverting the cluster-wide proxy"
+    if oc patch proxy/cluster --type=merge --patch='{"spec":{"trustedCA":{"name":""}}}'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad2 "Deleting the '${CONFIGMAP_NAME}' config map"
+    if oc delete configmap ${CONFIGMAP_NAME} -n openshift-config
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if [ -n "${API_SECRET_NAME}" ]
+  then
+    pad2 "Reverting the cluster apiserver"
+    if oc patch apiserver/cluster --type=merge --patch='{"spec":{"servingCerts":null}}'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad2 "Deleting the '${API_SECRET_NAME}' secret"
+    if oc delete secret ${API_SECRET_NAME} -n openshift-config
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  pad2 "Creating Classroom CA Certificate"
+  if ansible-playbook ${playbook_dir}/certs/classroom-ca.yml
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+    # Uncomment the show_ansible line if you would like a message to be displayed
+    # if the playbook fails. This is especially useful during lab development.
+    show_ansible "${playbook_dir}/certs/classroom-ca.yml"
+  fi
+
+  pad2 "Creating Wildcard and Master API Certificate"
+  if ansible-playbook ${playbook_dir}/certs/wildcard-api.yml -e cert_path=/home/student/${RHT_COURSE^^}/labs/${this} -e cert_name=${cert_name} -e combined_name=${combined_name} -e update_cert=True
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+    # Uncomment the show_ansible line if you would like a message to be displayed
+    # if the playbook fails. This is especially useful during lab development.
+    show_ansible "${playbook_dir}/certs/wildcard-api.yml" "-e cert_path=/home/student/${RHT_COURSE^^}/labs/${this} -e cert_name=${cert_name} -e combined_name=${combined_name} -e update_cert=True"
+  fi
+
+  # There may be router pods in a failed phase with a reason of MatchNodeSelector.
+  # This is an issue with the environment as of May 29, 2020.
+  # Delete those pods if they exist.
+  for POD in $(oc get pods -o name -n openshift-ingress)
+  do
+    POD_STATUS="$(oc get ${POD} -n openshift-ingress -o jsonpath='{.status.phase}')"
+    if [ "${POD_STATUS}" == "Failed" ]
+    then
+      oc delete ${POD} -n openshift-ingress
+    fi
+  done
+
+  ocp4_print_setup_footer
+}
+
+function lab_grade {
+
+  ocp4_login_as_admin
+  ocp4_print_grade_header
+
+  local lab_cert_dir="/home/student/${RHT_COURSE^^}/labs/${this}"
+  local CERT_SERIAL="$(openssl x509 -in ${lab_cert_dir}/${cert_name}.pem -noout -serial)"
+  local COMBINED_SERIAL="$(openssl x509 -in ${lab_cert_dir}/${combined_name}.pem -noout -serial)"
+
+  # Cluster proxy checks
+  print_line " Cluster proxy checks"
+  pad2 "The cluster proxy defines a trustedCA configuration map"
+  local CONFIGMAP_NAME="$(oc get proxy/cluster -o jsonpath='{.spec.trustedCA.name}')"
+  if [ -n "${CONFIGMAP_NAME}" ]
+  then
+    print_PASS
+    if ! [ -d "${grading_dir}/${CONFIGMAP_NAME}" ]
+    then
+      mkdir -p ${grading_dir}/${CONFIGMAP_NAME}
+    fi
+    pad2 "Extracting the '${CONFIGMAP_NAME}' configuration map"
+    if oc extract configmap/${CONFIGMAP_NAME} -n openshift-config --to=${grading_dir}/${CONFIGMAP_NAME} --confirm
+    then
+      print_PASS
+    else
+      print_FAIL
+    fi
+    pad2 "The certificate in the '${CONFIGMAP_NAME}' configuration map has the correct serial number"
+    if [ -f ${grading_dir}/${CONFIGMAP_NAME}/ca-bundle.crt ]
+    then
+      local CM_SERIAL="$(openssl x509 -in ${grading_dir}/${CONFIGMAP_NAME}/ca-bundle.crt -noout -serial)"
+      if [ "${CM_SERIAL}" == "${COMBINED_SERIAL}" ]
+      then
+        print_PASS
+      else
+        print_FAIL
+      fi
+    else
+      print_FAIL
+    fi
+  else
+    print_FAIL
+  fi
+
+  # Default ingress controller operator checks
+  print_line
+  print_line " Default ingress controller operator checks"
+  pad2 "The ingress controller defines a defaultCertificate secret"
+  local SECRET_NAME="$(oc get ingresscontrollers.operator.openshift.io/default -n openshift-ingress-operator -o jsonpath='{.spec.defaultCertificate.name}')"
+  if [ -n "${SECRET_NAME}" ]
+  then
+    print_PASS
+    if ! [ -d "${grading_dir}/${SECRET_NAME}" ]
+    then
+      mkdir -p ${grading_dir}/${SECRET_NAME}
+    fi
+    pad2 "Extracting the '${SECRET_NAME}' secret"
+    if oc extract secret/${SECRET_NAME} -n openshift-ingress --to=${grading_dir}/${SECRET_NAME} --confirm
+    then
+      print_PASS
+    else
+      print_FAIL
+    fi
+    pad2 "The certificate in the '${SECRET_NAME}' secret has the correct serial number"
+    if [ -f ${grading_dir}/${SECRET_NAME}/tls.crt ]
+    then
+      local SECRET_SERIAL="$(openssl x509 -in ${grading_dir}/${SECRET_NAME}/tls.crt -noout -serial)"
+      if [ "${SECRET_SERIAL}" == "${COMBINED_SERIAL}" ]
+      then
+        print_PASS
+      else
+        print_FAIL
+      fi
+    else
+      print_FAIL
+    fi
+
+    local wildcard_limit=24
+    local wildcard_count=0
+    local wildcard_trust="false"
+    if curl -v https://console-openshift-console.apps.ocp4.example.com 2>&1 | grep 'SSL certificate verify ok.'
+    then
+      wildcard_trust="true"
+    fi
+    while [ ${wildcard_count} -lt ${wildcard_limit} ]
+    do
+      if [ "${wildcard_trust}" == "false" ]
+      then
+        if [ ${wildcard_count} -eq 0 ]
+        then
+          print_line " > Waiting up to 2 minutes for router pods"
+        elif [ ${wildcard_count} -eq 11 ]
+        then
+          print_line " > Waiting up to 1 minute for router pods"
+        fi
+        if curl -v https://console-openshift-console.apps.ocp4.example.com 2>&1 | grep 'SSL certificate verify ok.'
+        then
+          wildcard_trust="true"
+        else
+          sleep 5
+        fi
+      fi
+      ((wildcard_count=wildcard_count+1))
+    done
+    pad2 "The workstation machine trusts the wildcard certificate"
+    if [ "${wildcard_trust}" == "true" ]
+    then
+      print_PASS
+    else
+      print_FAIL
+    fi
+  else
+    print_FAIL
+  fi
+
+  # API certificate checks
+  print_line
+  print_line " API certificate checks"
+  pad2 "API defines a servingCertificate secret"
+  local API_SECRET_NAME="$(oc get apiserver/cluster -o jsonpath='{.spec.servingCerts.namedCertificates[0].servingCertificate.name}')"
+  if [ -n "${API_SECRET_NAME}" ]
+  then
+    print_PASS
+    if ! [ -d "${grading_dir}/${API_SECRET_NAME}" ]
+    then
+      mkdir -p ${grading_dir}/${API_SECRET_NAME}
+    fi
+    pad2 "Extracting the '${API_SECRET_NAME}' secret"
+    if oc extract secret/${API_SECRET_NAME} -n openshift-config --to=${grading_dir}/${API_SECRET_NAME} --confirm
+    then
+      print_PASS
+    else
+      print_FAIL
+    fi
+    pad2 "The certificate in the '${API_SECRET_NAME}' secret has the correct serial number"
+    if [ -f ${grading_dir}/${API_SECRET_NAME}/tls.crt ]
+    then
+      local API_SECRET_SERIAL="$(openssl x509 -in ${grading_dir}/${API_SECRET_NAME}/tls.crt -noout -serial)"
+      if [ "${API_SECRET_SERIAL}" == "${COMBINED_SERIAL}" ]
+      then
+        print_PASS
+      else
+        print_FAIL
+      fi
+    else
+      print_FAIL
+    fi
+
+    local api_limit=60
+    local api_count=0
+    local api_trust="false"
+    if curl -v https://api.ocp4.example.com:6443 2>&1 | grep 'SSL certificate verify ok.'
+    then
+      api_trust="true"
+    fi
+    while [ ${api_count} -lt ${api_limit} ]
+    do
+      if [ "${api_trust}" == "false" ]
+      then
+        if [ ${api_count} -eq 0 ]
+        then
+          print_line " > Waiting up to 5 minutes for apiserver pods"
+        elif [ ${api_count} -eq 11 ]
+        then
+          print_line " > Waiting up to 4 minutes for apiserver pods"
+        elif [ ${api_count} -eq 23 ]
+        then
+          print_line " > Waiting up to 3 minutes for apiserver pods"
+        elif [ ${api_count} -eq 35 ]
+        then
+          print_line " > Waiting up to 2 minutes for apiserver pods"
+        elif [ ${api_count} -eq 47 ]
+        then
+          print_line " > Waiting up to 1 minute for apiserver pods"
+        fi
+        if curl -v https://api.ocp4.example.com:6443 2>&1 | grep 'SSL certificate verify ok.'
+        then
+          api_trust="true"
+        else
+          sleep 5
+        fi
+      fi
+      ((api_count=api_count+1))
+    done
+    pad2 "The workstation machine trusts the API certificate"
+    if [ "${api_trust}" == "true" ]
+    then
+      print_PASS
+    else
+      print_FAIL
+    fi
+  else
+    print_FAIL
+  fi
+
+  ocp4_print_grade_footer
+}
+
+function lab_finish {
+  ocp4_print_cleanup_header
+  ocp4_login_as_admin
+
+  local SECRET_NAME="$(oc get ingresscontrollers.operator.openshift.io/default -n openshift-ingress-operator -o jsonpath='{.spec.defaultCertificate.name}')"
+  local CONFIGMAP_NAME="$(oc get proxy/cluster -o jsonpath='{.spec.trustedCA.name}')"
+  local API_SECRET_NAME="$(oc get apiserver/cluster -o jsonpath='{.spec.servingCerts.namedCertificates[0].servingCertificate.name}')"
+
+  if [ -n "${SECRET_NAME}" ]
+  then
+    pad2 "Reverting the default ingress controller operator"
+    if oc patch ingresscontroller.operator/default --type=merge --patch='{"spec":{"defaultCertificate":null}}' -n openshift-ingress-operator
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad2 "Deleting the '${SECRET_NAME}' secret"
+    if oc delete secret ${SECRET_NAME} -n openshift-ingress
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if [ -n "${CONFIGMAP_NAME}" ]
+  then
+    pad2 "Reverting the cluster-wide proxy"
+    if oc patch proxy/cluster --type=merge --patch='{"spec":{"trustedCA":{"name":""}}}'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad2 "Deleting the '${CONFIGMAP_NAME}' config map"
+    if oc delete configmap ${CONFIGMAP_NAME} -n openshift-config
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if [ -n "${API_SECRET_NAME}" ]
+  then
+    pad2 "Reverting the cluster apiserver"
+    if oc patch apiserver/cluster --type=merge --patch='{"spec":{"servingCerts":null}}'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad2 "Deleting the '${API_SECRET_NAME}' secret"
+    if oc delete secret ${API_SECRET_NAME} -n openshift-config
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if [ -d "${grading_dir}" ]
+  then
+    rm -rf ${grading_dir}
+  fi
+
+  ocp4_cleanup_lab_files
+  ocp4_print_cleanup_footer
+}
+
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

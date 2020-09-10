@@ -1,0 +1,58 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-automation-rest - lab script for DO380-OCP4
+#
+# SYNOPSIS
+#     lab-automation-rest {start|finish}
+#
+#        start  - prepare the system for starting the lab
+#        finish - perform post-lab finish
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start or finish for
+#     the Guided Exercise: Navigating the OpenShift REST API.
+#
+# CHANGELOG
+#   * Wed Jul 29 Michael Phillips <miphilli@redhat.com>
+#   - added the ocp4_login_as_admin function after the ocp4_is_cluster_up function
+#   * Tue Jun 15 Alex Corcoles <acorcole@redhat.com>
+#   - Initial add
+
+#########################################################################
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/root/bin:/usr/local/bin
+declare -a valid_commands=(start finish)
+
+# Change these variables to match your exercise
+this='automation-rest'
+title='Guided Exercise: Navigating the OpenShift REST API'
+
+# Do not change these variables
+target='workstation'
+run_as_root='true'
+
+
+function lab_start {
+  ocp4_print_prereq_header
+  ocp4_is_cluster_up
+  ocp4_login_as_admin
+  ocp4_exit_on_failure
+}
+
+
+function lab_finish {
+  ocp4_print_cleanup_header
+  ocp4_print_cleanup_footer
+}
+
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

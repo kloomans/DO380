@@ -1,0 +1,53 @@
+---
+- name: Configure postfix on utility
+  hosts: utility
+  tasks:
+    - name: Install software
+      dnf:
+        name:
+          - postfix
+          - mutt
+          - mailx
+        state: latest
+      tags: always
+
+    - name: Start and enable services
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - postfix
+      tags: always
+
+    - name: Accept mail from OCP nodes
+      copy:
+        src: files/main.cf
+        dest: /etc/postfix/
+      notify: restart_postfix
+      tags: start
+
+    - name: Revert main.cf to default configuration
+      copy:
+        src: files/main.cf-orig
+        dest: /etc/postfix/main.cf
+      notify: restart_postfix
+      tags: finish
+
+    - name: Create ocp-admins alias
+      lineinfile:
+        path: /etc/aliases
+        regexp: '^ocp-admins'
+        line: "ocp-admins: lab"
+      notify: run_newaliases
+      tags: start
+
+  handlers:
+    - name: restart_postfix
+      service:
+        name: postfix
+        state: restarted
+
+    - name: run_newaliases
+      command: /usr/bin/newaliases
+      changed_when: false

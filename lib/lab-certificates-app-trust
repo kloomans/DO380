@@ -1,0 +1,254 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-certificates-app-trust - lab script for DO380-OCP4
+#
+# SYNOPSIS
+#     lab-certificates-app-trust {start|finish}
+#
+#        start  - prepare the system for starting the lab
+#        finish - perform post-lab finish
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start or finish for:
+#     Guided Exercise: Configuring Applications to Trust the Enterprise
+#     Certificate Authority
+#
+# CHANGELOG
+#   * Wed Jul 01 Michael Phillips <miphilli@redhat.com>
+#   - updated the DESCRIPTION
+#   * Fri Jun 26 Michael Phillips <miphilli@redhat.com>
+#   - updated for shared Ansible infrastructure
+#   * Fri May 29 Michael Phillips <miphilli@redhat.com>
+#   - original code
+
+#########################################################################
+#########################################################################
+#                   How to use this template:
+#
+# 1. Rename the file to lab-<something_related_to_your_lab>
+# 2. Adjust the comments above
+# 3. Modify the two functions, lab_setup and lab_grade to perform the
+#    steps you desire. All work is performed on workstation, so ssh and
+#    scp must be used to perform grading steps on remote host to be graded
+# 4. Remove these "How to use this template" comments
+# 5. If you need to retrieve some values from the cluster, look at
+#    http://sferich888.blogspot.com.br/2017/01/learning-using-jsonpath-with-openshift.html
+#########################################################################
+#########################################################################
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/root/bin:/usr/local/bin
+declare -a valid_commands=(start finish)
+
+# Change these variables to match your exercise
+this='certificates-app-trust'
+title='Guided Exercise: Configuring Applications to Trust the Enterprise Certificate Authority'
+playbook_dir="/usr/local/lib/ansible"
+cert_name="wildcard"
+combined_name="wildcard-combined"
+
+# Do not change these variables
+target='workstation'
+run_as_root='true'
+
+source /etc/rht
+
+function lab_start {
+
+  ocp4_print_prereq_header
+
+  ocp4_is_cluster_up
+  print_line
+  ocp4_fail_if_project_exists "${this}"
+  ocp4_exit_on_failure "It looks like you have already started this exercise. To try this exercise again, run 'lab ${this} finish' followed by 'lab ${this} start'."
+
+  ocp4_print_setup_header
+
+  print_line " Preparing the student's cluster:"
+  ocp4_login_as_admin
+  deploy_ansible
+
+  pad2 "Creating Classroom CA Certificate"
+  if ansible-playbook ${playbook_dir}/certs/classroom-ca.yml
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+    # Uncomment the show_ansible line if you would like a message to be displayed
+    # if the playbook fails. This is especially useful during lab development.
+    show_ansible "${playbook_dir}/certs/classroom-ca.yml"
+  fi
+
+  # Check if a wildcard certificate is already used by checking if the certificate
+  # used for the web console was signed by "GLS Training Classroom Certificate Authority".
+  # If so, it is likely that it is a combination wildcard & master API certificate.
+  pad2 "Checking if web console certifcate signed by Classroom CA"
+  curl --insecure -v https://console-openshift-console.apps.ocp4.example.com 2>&1 | grep "GLS Training Classroom Certificate Authority"
+
+  if [ $? -eq 0 ]
+  then
+    print_SUCCESS
+  else
+    print_SUCCESS
+  # If a wilcard certiifcate is not currently used, run the wildcard.yml playbook.
+  # This playbook does not modify the master API since changing the certificate
+  # for the master API takes much longer to apply.
+    pad2 "Creating Wildcard Certificate"
+    if ansible-playbook ${playbook_dir}/certs/wildcard.yml -e combined_name=${combined_name}
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+      show_ansible "${playbook_dir}/certs/wildcard.yml" "-e combined_name=${combined_name}"
+    fi
+
+    # Create a new configuration map in the openshift-config namespace
+    pad2 "Creating 'combined-certs' configuration map"
+    if [ -f /etc/pki/tls/certs/${combined_name}.pem ]
+    then
+      if ! oc get configmap/combined-certs -n openshift-config
+      then
+        if oc create configmap combined-certs --from-file=ca-bundle.crt=/etc/pki/tls/certs/${combined_name}.pem -n openshift-config
+        then
+          print_SUCCESS
+        else
+          print_FAIL
+        fi
+      else
+        print_SUCCESS
+      fi
+    else
+      # /etc/pki/tls/certs/${combined_name}.pem does not exist
+      print_FAIL
+    fi
+
+    # Patch proxy/cluster to use the new configuration map
+    pad2 "Patching the cluster-wide proxy to use the new configuration map"
+    if oc patch proxy/cluster --type=merge --patch='{"spec":{"trustedCA":{"name":"combined-certs"}}}'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    # Create a new secret in the openshift-ingress namespace
+    pad2 "Creating 'custom-tls-bundle' secret"
+    if ! oc get secret/custom-tls-bundle -n openshift-ingress
+    then
+      if oc create secret tls custom-tls-bundle --cert=/etc/pki/tls/certs/${combined_name}.pem --key=/etc/pki/tls/private/${cert_name}-key.pem -n openshift-ingress
+      then
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+    else
+      print_SUCCESS
+    fi
+
+    # Patch ingresscontroller.operator/default
+    pad2 "Patching the default ingress controller to use the new secret"
+    if oc patch ingresscontroller.operator/default --type=merge --patch='{"spec":{"defaultCertificate":{"name":"custom-tls-bundle"}}}' -n openshift-ingress-operator
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+    # We could wait for the new router pods in the openshift-ingress namespace to
+    # redeploy, but they should be ready by the time students need them.
+  fi
+
+  # There may be router pods in a failed phase with a reason of MatchNodeSelector.
+  # This is an issue with the environment as of May 29, 2020.
+  # Delete those pods if they exist.
+  for POD in $(oc get pods -o name -n openshift-ingress)
+  do
+    POD_STATUS="$(oc get ${POD} -n openshift-ingress -o jsonpath='{.status.phase}')"
+    if [ "${POD_STATUS}" == "Failed" ]
+    then
+      oc delete ${POD} -n openshift-ingress
+    fi
+  done
+
+  ocp4_print_setup_footer
+}
+
+function lab_finish {
+  ocp4_print_cleanup_header
+  ocp4_login_as_admin
+
+  ocp4_delete_project "${this}"
+
+  local SECRET_NAME="$(oc get ingresscontrollers.operator.openshift.io/default -n openshift-ingress-operator -o jsonpath='{.spec.defaultCertificate.name}')"
+  local CONFIGMAP_NAME="$(oc get proxy/cluster -o jsonpath='{.spec.trustedCA.name}')"
+  local API_SECRET_NAME="$(oc get apiserver/cluster -o jsonpath='{.spec.servingCerts.namedCertificates[0].servingCertificate.name}')"
+
+  if [ -n "${SECRET_NAME}" ]
+  then
+    pad2 "Reverting the default ingress controller operator"
+    if oc patch ingresscontroller.operator/default --type=merge --patch='{"spec":{"defaultCertificate":null}}' -n openshift-ingress-operator
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad2 "Deleting the '${SECRET_NAME}' secret"
+    if oc delete secret ${SECRET_NAME} -n openshift-ingress
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if [ -n "${CONFIGMAP_NAME}" ]
+  then
+    pad2 "Reverting the cluster-wide proxy"
+    if oc patch proxy/cluster --type=merge --patch='{"spec":{"trustedCA":{"name":""}}}'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad2 "Deleting the '${CONFIGMAP_NAME}' config map"
+    if oc delete configmap ${CONFIGMAP_NAME} -n openshift-config
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if [ -n "${API_SECRET_NAME}" ]
+  then
+    pad2 "Reverting the cluster apiserver"
+    if oc patch apiserver/cluster --type=merge --patch='{"spec":{"servingCerts":null}}'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad2 "Deleting the '${API_SECRET_NAME}' secret"
+    if oc delete secret ${API_SECRET_NAME} -n openshift-config
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  ocp4_print_cleanup_footer
+}
+
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

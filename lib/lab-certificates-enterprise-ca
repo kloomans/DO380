@@ -1,0 +1,123 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-certificates-enterprise-ca - lab script for DO380-OCP4
+#
+# SYNOPSIS
+#     lab-certificates-enterprise-ca {start|finish}
+#
+#        start  - prepare the system for starting the lab
+#        finish - perform post-lab finish
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start or finish for:
+#     Guided Exercise: Integrating OpenShift with an Enterprise Certificate Authority
+#
+# CHANGELOG
+#   * Wed Jul 29 Michael Phillips <miphilli@redhat.com>
+#   - added the ocp4_login_as_admin function after the ocp4_is_cluster_up function
+#   * Wed Jul 01 Michael Phillips <miphilli@redhat.com>
+#   - updated the DESCRIPTION
+#   * Fri Jun 26 Michael Phillips <miphilli@redhat.com>
+#   - modified to use shared ansible intrastructure
+
+#########################################################################
+#########################################################################
+#                   How to use this template:
+#
+# 1. Rename the file to lab-<something_related_to_your_lab>
+# 2. Adjust the comments above
+# 3. Modify the two functions, lab_setup and lab_grade to perform the
+#    steps you desire. All work is performed on workstation, so ssh and
+#    scp must be used to perform grading steps on remote host to be graded
+# 4. Remove these "How to use this template" comments
+# 5. If you need to retrieve some values from the cluster, look at
+#    http://sferich888.blogspot.com.br/2017/01/learning-using-jsonpath-with-openshift.html
+#########################################################################
+#########################################################################
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/root/bin:/usr/local/bin
+declare -a valid_commands=(start finish)
+
+# Change these variables to match your exercise
+this='certificates-enterprise-ca'
+title='Guided Exercise: Integrating OpenShift with an Enterprise Certificate Authority'
+playbook_dir="/usr/local/lib/ansible"
+cert_name="wildcard-api"
+
+# Do not change these variables
+target='workstation'
+run_as_root='true'
+
+source /etc/rht
+
+function lab_start {
+
+  ocp4_print_prereq_header
+
+  ocp4_is_cluster_up
+  ocp4_login_as_admin
+  print_line
+  ocp4_exit_on_failure
+
+  ocp4_print_setup_header
+
+  print_line " Preparing the student's cluster:"
+  ocp4_grab_lab_files
+  deploy_ansible
+
+  pad2 "Creating Classroom CA Certificate"
+  if ansible-playbook ${playbook_dir}/certs/classroom-ca.yml
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+    # Uncomment the show_ansible line if you would like a message to be displayed
+    # if the playbook fails. This is especially useful during lab development.
+    show_ansible "${playbook_dir}/certs/classroom-ca.yml"
+  fi
+
+  pad2 "Creating Wildcard and Master API Certificate"
+  if ansible-playbook ${playbook_dir}/certs/wildcard-api.yml -e cert_path=/home/student/${RHT_COURSE^^}/labs/${this} -e cert_name=${cert_name} -e update_cert=True
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+    # Uncomment the show_ansible line if you would like a message to be displayed
+    # if the playbook fails. This is especially useful during lab development.
+    show_ansible "${playbook_dir}/certs/wildcard-api.yml" "-e cert_path=/home/student/${RHT_COURSE^^}/labs/${this} -e cert_name=${cert_name} -e update_cert=True"
+  fi
+
+  # There may be router pods in a failed phase with a reason of MatchNodeSelector.
+  # This is an issue with the environment as of May 29, 2020.
+  # Delete those pods if they exist.
+  for POD in $(oc get pods -o name -n openshift-ingress)
+  do
+    POD_STATUS="$(oc get ${POD} -n openshift-ingress -o jsonpath='{.status.phase}')"
+    if [ "${POD_STATUS}" == "Failed" ]
+    then
+      oc delete ${POD} -n openshift-ingress
+    fi
+  done
+
+  ocp4_print_setup_footer
+}
+
+function lab_finish {
+  ocp4_print_cleanup_header
+  ocp4_login_as_admin
+
+  ocp4_cleanup_lab_files
+  ocp4_print_cleanup_footer
+}
+
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

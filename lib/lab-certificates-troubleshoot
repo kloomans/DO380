@@ -1,0 +1,288 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-certificates-troubleshoot - lab script for DO380-OCP4
+#
+# SYNOPSIS
+#     lab-certificates-troubleshoot {start|finish}
+#
+#        start  - prepare the system for starting the lab
+#        finish - perform post-lab finish
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start or finish for:
+#     Guided Exercise: Troubleshooting OpenShift Certificates
+#
+# CHANGELOG
+#   * Wed Jul 29 Michael Phillips <miphilli@redhat.com>
+#   - added the ocp4_login_as_admin function after the ocp4_is_cluster_up function
+#   * Wed Jul 01 Michael Phillips <miphilli@redhat.com>
+#   - updated the DESCRIPTION
+#   * Fri Jun 26 Michael Phillips <miphilli@redhat.com>
+#   - Added some variables to pass to wildcard.yml based on the previous GEs.
+#   - Added logic to apply changes to existing configmaps or secrets if they exist.
+#   * Wed Jun 11 Michael Phillips <miphilli@redhat.com>
+#   - Removed "How to use this template" section
+#   * Wed Jun 04 Michael Phillips <miphilli@redhat.com>
+#   - original code
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/root/bin:/usr/local/bin
+declare -a valid_commands=(start finish)
+
+# Change these variables to match your exercise
+this='certificates-troubleshoot'
+title='Guided Exercise: Troubleshooting OpenShift Certificates'
+playbook_dir="/usr/local/lib/ansible"
+cert_name="wildcard"
+combined_name="wildcard-combined"
+
+# Do not change these variables
+target='workstation'
+run_as_root='true'
+
+source /etc/rht
+
+function lab_start {
+
+  ocp4_print_prereq_header
+
+  ocp4_is_cluster_up
+  ocp4_login_as_admin
+  print_line
+  #ocp4_fail_if_project_exists "${this}"
+  ocp4_exit_on_failure
+
+  ocp4_print_setup_header
+
+  print_line " Preparing the student's cluster:"
+  ocp4_grab_lab_files "no-solution"
+  deploy_ansible
+
+  pad2 "Creating Classroom CA Certificate"
+  if ansible-playbook ${playbook_dir}/certs/classroom-ca.yml
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+    # Uncomment the show_ansible line if you would like a message to be displayed
+    # if the playbook fails. This is especially useful during lab development.
+    show_ansible "${playbook_dir}/certs/classroom-ca.yml"
+  fi
+
+  pad2 "Creating Wildcard Certificate"
+  if ansible-playbook ${playbook_dir}/certs/wildcard.yml -e cert_path=/home/student/${RHT_COURSE^^}/labs/${this} -e "not_after=+1m" -e update_cert=True -e combined_name=${combined_name}
+  then
+    print_SUCCESS
+    # Check for existing 'wildcard-bundle' configuration map
+    if oc get configmap/wildcard-bundle -n openshift-config
+    then
+      oc extract configmap/wildcard-bundle -n openshift-config --to=/tmp/ --confirm
+      if ! diff /tmp/ca-bundle.crt /etc/pki/tls/certs/wildcard-combined.pem
+      then
+        pad2 "Applying changes to existing 'wildcard-bundle' configuration map"
+        if oc set data configmap/wildcard-bundle -n openshift-config --from-file=ca-bundle.crt=/etc/pki/tls/certs/wildcard-combined.pem
+        then
+          print_SUCCESS
+        else
+          print_FAIL
+        fi
+      fi
+      rm -f /tmp/ca-bundle.crt
+    else
+      # Create configmap in openshift-config
+      pad2 "Creating 'wildcard-bundle' configuration map"
+      if oc create configmap wildcard-bundle --from-file=ca-bundle.crt=/etc/pki/tls/certs/wildcard-combined.pem -n openshift-config
+      then
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+    fi
+    # Patch proxy/cluster
+    pad2 "Patching the cluster-wide proxy"
+    if oc patch proxy/cluster --type=merge --patch='{"spec":{"trustedCA":{"name":"wildcard-bundle"}}}'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+    # Check for existing 'wildcard-tls' secret
+    if oc get secret/wildcard-tls -n openshift-ingress
+    then
+      oc extract secret/wildcard-tls -n openshift-ingress --to=/tmp/ --confirm
+      if ! diff /tmp/tls.crt /etc/pki/tls/certs/wildcard-combined.pem
+      then
+        pad2 "Applying changes to existing 'wildcard-tls' secret"
+        if oc set data secret/wildcard-tls -n openshift-ingress --from-file=tls.crt=/etc/pki/tls/certs/wildcard-combined.pem --from-file=tls.key=/etc/pki/tls/private/wildcard-key.pem
+        then
+          print_SUCCESS
+        else
+          print_FAIL
+        fi
+      fi
+      rm -rf /tmp/tls.crt /tmp/tls.key
+    else
+      # Create secret in openshift-ingress
+      pad2 "Creating 'wildcard-tls' secret"
+      if oc create secret tls wildcard-tls --cert=/etc/pki/tls/certs/wildcard-combined.pem --key=/etc/pki/tls/private/wildcard-key.pem -n openshift-ingress
+      then
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+    fi
+    # Patch ingresscontroller/default
+    pad2 "Patching the default ingress controller operator"
+    if oc patch ingresscontroller.operator/default -n openshift-ingress-operator --type=merge --patch='{"spec":{"defaultCertificate":{"name":"wildcard-tls"}}}'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_FAIL
+    # Uncomment the show_ansible line if you would like a message to be displayed
+    # if the playbook fails. This is especially useful during lab development.
+    show_ansible "${playbook_dir}/certs/wildcard.yml" "-e cert_path=/home/student/${RHT_COURSE^^}/labs/${this} -e \"not_after=+1m\" -e update_cert=True -e combined_name=${combined_name}"
+  fi
+
+  pad2 "Creating Master API Certificate"
+  if ansible-playbook ${playbook_dir}/certs/custom.yml -e cert_path=/home/student/${RHT_COURSE^^}/labs/${this} -e "not_after=+1m" -e cert_name=api -e 'cert_comment="Master API Certificate"' -e update_cert=True -e combined_name=api-combined
+  then
+    print_SUCCESS
+    # Check for existing 'api-tls' secret
+    if oc get secret/api-tls -n openshift-config
+    then
+      oc extract secret/api-tls -n openshift-config --to=/tmp/ --confirm
+      if ! diff /tmp/tls.crt /etc/pki/tls/certs/api-combined.pem
+      then
+        pad2 "Applying changes to existing 'api-tls' secret"
+        if oc set data secret/api-tls -n openshift-config --from-file=tls.crt=/etc/pki/tls/certs/api-combined.pem --from-file=tls.key=/etc/pki/tls/private/api-key.pem
+        then
+          print_SUCCESS
+        else
+          print_FAIL
+        fi
+      fi
+      rm -rf /tmp/tls.crt /tmp/tls.key
+    else
+      # Create secret in openshift-ingress
+      pad2 "Creating 'api-tls' secret"
+      if oc create secret tls api-tls --cert=/etc/pki/tls/certs/api-combined.pem --key=/etc/pki/tls/private/api-key.pem -n openshift-config
+      then
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+    fi
+    # Patch apiserver/cluster
+    pad2 "Patching the cluster apiserver"
+    if oc patch apiserver/cluster --type=merge -p  '{"spec":{"servingCerts": {"namedCertificates": [{"names": ["api.ocp4.example.com"], "servingCertificate": {"name": "api-tls"}}]}}}'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    print_FAIL
+    # Uncomment the show_ansible line if you would like a message to be displayed
+    # if the playbook fails. This is especially useful during lab development.
+    show_ansible "${playbook_dir}/certs/custom.yml" "-e cert_path=/home/student/${RHT_COURSE^^}/labs/${this} -e \"not_after=+1m\" -e cert_name=api -e \"cert_comment='Master API Certificate'\" -e update_cert=True -e combined_name=api-combined"
+  fi
+
+  # There may be router pods in a failed phase with a reason of MatchNodeSelector.
+  # This is an issue with the environment as of May 29, 2020.
+  # Delete those pods if they exist.
+  for POD in $(oc get pods -o name -n openshift-ingress)
+  do
+    POD_STATUS="$(oc get ${POD} -n openshift-ingress -o jsonpath='{.status.phase}')"
+    if [ "${POD_STATUS}" == "Failed" ]
+    then
+      oc delete ${POD} -n openshift-ingress
+    fi
+  done
+
+  ocp4_print_setup_footer
+}
+
+function lab_finish {
+  ocp4_print_cleanup_header
+  ocp4_login_as_admin
+
+  local SECRET_NAME="$(oc get ingresscontrollers.operator.openshift.io/default -n openshift-ingress-operator -o jsonpath='{.spec.defaultCertificate.name}')"
+  local CONFIGMAP_NAME="$(oc get proxy/cluster -o jsonpath='{.spec.trustedCA.name}')"
+  local API_SECRET_NAME="$(oc get apiserver/cluster -o jsonpath='{.spec.servingCerts.namedCertificates[0].servingCertificate.name}')"
+
+  if [ -n "${SECRET_NAME}" ]
+  then
+    pad2 "Reverting the default ingress controller operator"
+    if oc patch ingresscontroller.operator/default --type=merge --patch='{"spec":{"defaultCertificate":null}}' -n openshift-ingress-operator
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad2 "Deleting the '${SECRET_NAME}' secret"
+    if oc delete secret ${SECRET_NAME} -n openshift-ingress
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if [ -n "${CONFIGMAP_NAME}" ]
+  then
+    pad2 "Reverting the cluster-wide proxy"
+    if oc patch proxy/cluster --type=merge --patch='{"spec":{"trustedCA":{"name":""}}}'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad2 "Deleting the '${CONFIGMAP_NAME}' config map"
+    if oc delete configmap ${CONFIGMAP_NAME} -n openshift-config
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if [ -n "${API_SECRET_NAME}" ]
+  then
+    pad2 "Reverting the cluster apiserver"
+    if oc patch apiserver/cluster --type=merge --patch='{"spec":{"servingCerts":null}}'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad2 "Deleting the '${API_SECRET_NAME}' secret"
+    if oc delete secret ${API_SECRET_NAME} -n openshift-config
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  #ocp4_delete_project "${this}"
+
+  ocp4_cleanup_lab_files
+  ocp4_print_cleanup_footer
+}
+
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

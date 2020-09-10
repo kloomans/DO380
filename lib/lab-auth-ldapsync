@@ -1,0 +1,102 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-auth-ldapsync - lab script for DO380-OCP4
+#
+# SYNOPSIS
+#     lab-auth-ldapsync {start|finish}
+#
+#        start  - prepare the system for starting the lab
+#        finish - perform post-lab finish
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start or finish for
+#     the Configuring the LDAP Identity Provider
+#
+# CHANGELOG
+#   * Tue May 26 Alex Corcoles <acorcole@redhat.com>
+#   - initial creation
+
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/root/bin:/usr/local/bin
+declare -a valid_commands=(start finish)
+
+# Change these variables to match your exercise
+this='auth-ldapsync'
+title='Guided Exercise: Synchronizing OpenShift Groups with LDAP'
+playbook_dir="/usr/local/lib/ansible"
+
+# Do not change these variables
+target='workstation'
+run_as_root='true'
+
+
+function lab_start {
+
+  ocp4_print_prereq_header
+
+  ocp4_is_cluster_up
+  print_line
+
+  ocp4_print_setup_header
+
+  print_line
+  print_line " Preparing the student's cluster:"
+
+  ocp4_grab_lab_files
+  ocp4_login_as_kubeadmin
+  ocp4_reset_ldap_sync
+  ocp4_setup_ldap_oauth
+  deploy_ansible
+
+  pad2 "Setting up IdM"
+  if ansible-playbook ${playbook_dir}/auth/idm-setup.yml -e idm_state=present
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad2 "Remove cluster-admin rolebinding from openshift-admins if exists"
+  oc adm policy remove-cluster-role-from-group cluster-admin openshift-admins
+  print_SUCCESS
+
+  ocp4_print_setup_footer
+}
+
+
+function lab_finish {
+
+  ocp4_print_cleanup_header
+
+  ocp4_login_as_kubeadmin
+
+  ocp4_reset_ldap_sync
+  ocp4_reset_ldap_auth
+
+  pad2 "Tearing down IdM"
+  if ansible-playbook ${playbook_dir}/auth/idm-setup.yml -e idm_state=absent
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad2 "Remove cluster-admin rolebinding from openshift-admins if exists"
+  oc adm policy remove-cluster-role-from-group cluster-admin openshift-admins
+  print_SUCCESS
+
+  ocp4_cleanup_lab_files
+  ocp4_print_cleanup_footer
+}
+
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

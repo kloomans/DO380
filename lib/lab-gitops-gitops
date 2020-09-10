@@ -1,0 +1,168 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-gitops-gitops - lab script for DO380-OCP4
+#
+# SYNOPSIS
+#     lab-gitops-gitops {start|finish}
+#
+#        start  - prepare the system for starting the lab
+#        finish - perform post-lab finish
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start or finish for
+#     "Configuring OpenShift using GitOps and Jenkins"
+#
+# CHANGELOG
+#   * Wed Jul 29 Michael Phillips <miphilli@redhat.com>
+#   - added the ocp4_login_as_admin function after the ocp4_is_cluster_up function
+#   * Tue Jun 10 Fernando Lozano <flozano@redhat.com>
+#   - original code
+
+#########################################################################
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/root/bin:/usr/local/bin
+declare -a valid_commands=(start finish)
+
+# Change these variables to match your exercise
+this='gitops-gitops'
+title='Guided Exercise: Configuring OpenShift using GitOps and Jenkins'
+
+# Do not change these variables
+target='workstation'
+run_as_root='true'
+
+
+function ocp4_deploy_jenkins {
+
+  print_line
+  print_line ' Verifying if Jenkins is available:'
+
+  local proj=gitops-deploy
+  if oc get project "${proj}" -o name
+  then
+    pad2 "Project '${proj}' exists"
+    oc project "${proj}"
+    print_SUCCESS
+  else
+    pad2 "Create project '${proj}'"
+    if oc new-project "${proj}"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  local dc=jenkins
+  if oc get dc "${dc}"
+  then
+    pad2 "Deployment configuration '${dc}' exists"
+    print_SUCCESS
+  else
+    local template=jenkins-persistent
+    pad2 "Deploy Jenkins from the '${template}' template"
+    if oc new-app "${template}" -o name
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  pad2 "Jenkins pod is ready and running"
+  if ocp4_wait "${proj}" "dc/${dc}"
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad2 "User 'developer' is a Jenkins administrator"
+  if oc policy add-role-to-user admin developer
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad2 'Jenkins can create new projects'
+  if oc adm policy add-cluster-role-to-user self-provisioner -z jenkins
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+}
+
+
+function lab_start {
+
+  ocp4_print_prereq_header
+
+  ocp4_is_cluster_up
+  ocp4_login_as_admin
+  ocp4_exit_on_failure
+
+  ocp4_print_setup_header
+
+  print_line " Preparing the student's cluster:"
+  ocp4_restore_oauth
+  ocp4_deploy_jenkins
+
+  print_line
+  print_line " Preparing the student's workstation:"
+  ocp4_grab_lab_files
+
+  ocp4_print_setup_footer
+}
+
+
+function lab_finish {
+  ocp4_print_cleanup_header
+  ocp4_login_as_admin
+
+  # not very precise check that the jenkins sa is a cluster administrator
+  local flag=$( oc policy who-can create oauth -A -o jsonpath='{.users[?(@=="system:serviceaccount:gitops-deploy:jenkins")]}' )
+  if [ -n "${flag}" ]
+  then
+    pad2 "Revoking cluster administrator rights from Jenkins"
+    if oc adm policy remove-cluster-role-from-user cluster-admin -z jenkins -n gitops-deploy
+    then
+   	  print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  local flag2=$( oc policy who-can create projectrequest -A -o jsonpath='{.users[?(@=="system:serviceaccount:gitops-deploy:jenkins")]}' )
+  if [ -n "${flag2}" ]
+  then
+    pad2 "Revoking project creation rights from Jenkins"
+    if oc adm policy remove-cluster-role-from-user self-provisioner -z jenkins -n gitops-deploy
+    then
+   	  print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  ocp4_delete_project 'gitops-deploy'
+  ocp4_restore_oauth
+
+  ocp4_cleanup_lab_files
+  ocp4_print_cleanup_footer
+}
+
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"
+
+# vim: ts=4 sw=2

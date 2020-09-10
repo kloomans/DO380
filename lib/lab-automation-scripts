@@ -1,0 +1,94 @@
+#!/bin/bash
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     lab-automation-scripts - lab script for DO380-OCP4
+#
+# SYNOPSIS
+#     lab-automation-scripts {start|finish}
+#
+#        start  - prepare the system for starting the lab
+#        finish - perform post-lab finish
+#
+# DESCRIPTION
+#     This script, based on singular argument, either does start or finish for
+#     the Guided Exercise: Deploying Scripts on OpenShift
+#
+# CHANGELOG
+#   * Wed Jul 29 Michael Phillips <miphilli@redhat.com>
+#   - added the ocp4_login_as_admin function after the ocp4_is_cluster_up function
+#   * Tue Jun 15 Alex Corcoles <acorcole@redhat.com>
+#   - initial add
+
+#########################################################################
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:/root/bin:/usr/local/bin
+declare -a valid_commands=(start finish)
+
+# Change these variables to match your exercise
+this='automation-scripts'
+title='Guided Exercise: Deploying Scripts on OpenShift'
+
+# Do not change these variables
+target='workstation'
+run_as_root='true'
+
+
+function lab_start {
+  ocp4_print_prereq_header
+  ocp4_is_cluster_up
+  ocp4_login_as_admin
+  print_line
+  ocp4_fail_if_project_exists "${this}"
+  ocp4_exit_on_failure "It looks like you have already started this exercise. To try this exercise again, run 'lab ${this} finish' followed by 'lab ${this} start'."
+
+  print_line
+  print_line " Preparing the student's cluster:"
+  ocp4_grab_lab_files
+
+  ocp4_exit_on_failure
+}
+
+
+function lab_finish {
+  ocp4_print_cleanup_header
+
+  ocp4_login_as_admin
+  ocp4_delete_project "${this}"
+
+  if oc get clusterrole auditor
+  then
+    pad2 "Deleting the 'auditor' ClusterRole"
+    if oc delete clusterrole auditor --ignore-not-found=true
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if oc get clusterrolebinding auditor
+  then
+    pad2 "Deleting the 'auditor' ClusterRoleBinding"
+    if oc delete clusterrolebinding auditor --ignore-not-found=true
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  ocp4_cleanup_lab_files
+
+  ocp4_print_cleanup_footer
+}
+
+
+############### Don't EVER change anything below this line ###############
+
+# Source library of functions
+source /usr/local/lib/${function_lib}
+source /usr/local/lib/${platform_lib}
+
+grading_main_program "$@"

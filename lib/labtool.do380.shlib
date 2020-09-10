@@ -1,0 +1,1654 @@
+#
+# Copyright 2020 Red Hat, Inc.
+#
+# NAME
+#     labtool.do380.shlib - lab grading script do380 function library
+#
+# SYNOPSIS
+#     Add the following line at the top of your script:
+#
+#        source /path/to/labtool.do380.shlib
+#
+#     *after* the source of the generic labtool.shlib
+#
+# DESCRIPTION
+#
+# CHANGELOG
+#
+#   * Wed Jul 29 Michael Phillips <miphilli@redhat.com>
+#   - Added Jim's functionality to check if cluster is accessible to the ocp4_check_api function
+#   - Added new functions grab_kubeconfig and test_ocp4_login
+#   - Adjusted the ocp4_login_as_admin and ocp4_login_as_kubeadmin functions
+#   - Adjusted the ocp4_is_cluster_up function to account for these changes
+#   * Wed Jun 10 Fernando Lozano <flozano@redhat.com>
+#   - Add ocp4_wait from DO288
+#   * Fri Jun 09 Iván Chavero <ichavero@redhat.com>
+#   - Added ocp4_setup_ldap_oauth function
+#   - Added ocp4_reset_ldap_sync function
+#   - Added ocp4_login_as_kubeadmin function
+#   - Added ocp4_check_api function function
+#   * Fri Jun 05 Iván Chavero <ichavero@redhat.com>
+#   - Added auth ldap reset function
+#   - Added ocp4_restore_oauth function
+#   - Added ocp4_setup_ldap_oauth function
+#   * Mon May 18 Michael Phillips <miphilli@redhat.com>
+#   - Initial configuration for OCP 4.4 version.
+#   * Tue Jun 04 2019 George Hacker <ghacker@redhat.com>
+#   - create template
+#
+
+#########################################################################
+##########################################################################
+##                   How to use this template:
+##
+## 1. Rename the file to labtool.<platform>.shlib
+## 2. Adjust the comments above
+## 3. Add functions below here to override and/or supplement
+##    labtool.shlib
+## 4. Remove these "How to use this template" comments
+##########################################################################
+##########################################################################
+
+
+# vim: ts=4 sw=2
+
+# Get RHT_* variable definitions
+[[ -f /etc/rht ]] && source /etc/rht
+
+##########################################################################
+## Global variables
+## Those need to be customized for each courses
+## Each script also needs do define:
+## - this: exercise's folder name (equal do grading script name)
+## - title: exercise's title
+##########################################################################
+
+COURSE="DO380"
+COURSE_HOME="/home/student/${COURSE}"
+
+
+##########################################################################
+## Global variables
+## Those are used by the functions but should not require customization
+##########################################################################
+
+labs="${COURSE_HOME}/labs"
+solutions="${COURSE_HOME}/solutions"
+curl_save='curl -s -S -o'
+#materials="http://content.example.com/courses/${RHT_COURSE}/${RHT_VMTREE%/*}/materials"
+materials="http://materials.example.com"
+contents="http://content.example.com"
+
+TIMEOUT=6
+
+# IMPORTANT: Keep this in sync with the lab-configure script
+# This should not be needed for the OpenStack environment classroom on Novello.
+#RHT_OCP4_CONFIG=/usr/local/etc/ocp4.config
+#source ${RHT_OCP4_CONFIG} &>/dev/null
+
+
+##########################################################################
+## Generic functions
+## Those should be reusable without changes by other courses
+##########################################################################
+
+function ocp4_create_downloads_folder {
+
+  local folder='/home/student/Downloads'
+  if ! [ -d "${folder}" ]; then
+    ocp4_pad "Create the student's Downloads folder"
+    if mkdir "${folder}" && chown student:student "${folder}"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+}
+
+
+function ocp4_pad {
+  pad2 "$@"
+}
+
+
+function ocp4_print_prereq_header {
+  print_header "Checking prerequisites for ${title}"
+}
+
+
+function ocp4_print_setup_header {
+  print_header "Setting up the classroom for ${title}"
+}
+
+
+function ocp4_print_setup_footer {
+  print_line
+  pad 'Overall start status'
+
+  if [[ ${fail_count} -eq 0 ]]
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+  print_line
+}
+
+
+function ocp4_print_grade_header {
+  print_header "Grading the student's work for ${title}"
+}
+
+
+function ocp4_print_grade_footer {
+  print_line
+  pad 'Overall exercise grade'
+  if [[ ${fail_count} -eq 0 ]]
+  then
+    print_PASS
+  else
+    print_FAIL
+  fi
+
+  print_line
+}
+
+
+function ocp4_print_cleanup_header {
+  print_header "Completing ${title}"
+}
+
+
+function ocp4_print_cleanup_footer {
+  print_header "Please use start if you wish to do the exercise again."
+}
+
+
+function ocp4_print_noop_cleanup_footer {
+  print_header 'Please follow the exercise instructions if you want to perform optional cleanup and do the exercise again'
+}
+
+
+function ocp4_print_on_failure {
+  local msg="$1"
+
+  if [ ${fail_count} != 0 ]
+  then
+    print_line
+    print_line "${msg}"
+    print_line
+  fi
+}
+
+
+#XXX really need this one? Should use fail from the generic shlib?
+
+function ocp4_exit_on_failure {
+  local msg="$1"
+
+  if [ ${fail_count} != 0 ]
+  then
+    print_line
+    pad 'Cannot continue due to the previous errors'
+    print_FAIL
+    if [ "${msg}" != "" ]
+    then
+        print_line "${msg}"
+    fi
+    print_line
+    exit 1
+  fi
+}
+
+
+function ocp4_download_file {
+  local final_name="$1"
+  local destination="$2"
+  local url="$3"
+
+  pad " · Download ${final_name}"
+
+  ${curl_save} "${destination}/${final_name}" "${url}"
+  if [ -f "${destination}/${final_name}" ]; then
+    chown -R student:student "${destination}"
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+}
+
+
+function ocp4_grab_lab_files
+{
+  local no_solution="$1"
+
+  #print_line " Downloading files for ${title}"
+
+  if [ -d "${labs}/${this}" ]; then
+    #print_line " Files were already been downloaded. Use finish if you want to start over."
+    #print_line
+    pad ' · Skip download of exercise and solution files'
+    print_SUCCESS
+    return
+  fi
+
+  pad ' · Download exercise files'
+  mkdir -p "${labs}/${this}"
+  chown student:student "${COURSE_HOME}"
+  chown student:student "${labs}"
+
+  ${curl_save} ${labs}/${this}.tgz ${materials}/labs/${this}.tgz
+  if [ -f "${labs}/${this}.tgz" ]; then
+    pushd ${labs}
+    if tar xzf ${this}.tgz ; then
+      rm -f ${this}.tgz
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+    popd
+  else
+    print_FAIL
+  fi
+
+  chown -R student:student "${labs}/${this}"
+
+  if [ "${no_solution}" == "" ]; then
+    pad ' · Download solution files'
+    mkdir -p "${solutions}/${this}"
+    chown student:student "${solutions}"
+
+    ${curl_save} ${solutions}/${this}.tgz ${materials}/solutions/${this}.tgz
+    if [ -f "${solutions}/${this}.tgz" ]; then
+      pushd ${solutions}
+      if tar xzf ${this}.tgz; then
+        rm -f ${this}.tgz
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+      popd
+    else
+      print_FAIL
+    fi
+
+    chown -R student:student "${solutions}/${this}"
+  fi
+}
+
+
+function ocp4_cleanup_lab_files
+{
+  if [ -d "${labs}/${this}" ]
+  then
+    pad ' · Remove exercise files'
+    rm -fr ${labs}/${this}
+    print_SUCCESS
+  fi
+
+  if [ -d "${solutions}/${this}" ]
+  then
+    pad ' · Remove solution files'
+    rm -fr ${solutions}/${this}
+    print_SUCCESS
+  fi
+}
+
+
+
+##########################################################################
+## Technology functions: OpenShift (OUC)
+## Those should be reusable without changes by courses using the
+## same technology and base classroom
+## Assumptions:
+## - Everything is done as the root user in workstation
+## - OBSOLETE: There is an 'admin' user with cluster admin privileges and password authentitcation
+## - OBSOLETE: There is a folder with kubeconfig and password files for authentitcation as cluster admin
+## - NEW: The sudent was given the password of the 'kubeadmin' user created by the installer
+## - lab-configure was run to set the 'admin' user credentials and master API URL
+##########################################################################
+
+
+function ocp4_login_as_admin {
+  test_ocp4_login admin redhat silent
+  if [ $? -eq 0 ]
+  then
+    /usr/bin/oc login -u admin -p redhat https://api.ocp4.example.com:6443 --insecure-skip-tls-verify
+  else
+    test_ocp4_login admin redhat
+  fi
+}
+
+
+function ocp4_login_as_kubeadmin {
+  local kubeadmin_password="$(ssh lab@utility cat /home/lab/ocp4/auth/kubeadmin-password)"
+  test_ocp4_login kubeadmin ${kubeadmin_password} silent
+  if [ $? -eq 0 ]
+  then
+    /usr/bin/oc login -u kubeadmin -p ${kubeadmin_password} https://api.ocp4.example.com:6443 --insecure-skip-tls-verify
+  else
+    test_ocp4_login kubeadmin ${kubeadmin_password}
+  fi
+}
+
+
+function ocp4_check_api {
+
+  # Wait for routers pods to sucessfully redirect requests
+  if ! curl -k -s https://console-openshift-console.apps.ocp4.example.com/auth/login
+  then
+    # Only display the pad2 message if the curl command fails
+    pad2 "Waiting up to 5 minutes for router pods to be available"
+    local ROUTER_COUNT=0
+    local ROUTER_COUNT_LIMIT=30
+    local ROUTER_AVAILABLE="false"
+    while [ ${ROUTER_COUNT} -lt ${ROUTER_COUNT_LIMIT} ]
+    do
+      if curl -k -s https://console-openshift-console.apps.ocp4.example.com/auth/login
+      then
+        ROUTER_AVAILABLE="true"
+        break
+      else
+        sleep 10
+        ((ROUTER_COUNT=ROUTER_COUNT+1))
+      fi
+    done
+    if [ "${ROUTER_AVAILABLE}" == "true" ]
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    pad2 "Router pods are available"
+    print_SUCCESS
+  fi
+  # This curl command (with an embedded curl command) simulates going to
+  # https://console-openshift-console.apps.ocp4.example.com, which points to
+  # https://console-openshift-console.apps.ocp4.example.com/auth/login, which
+  # redirects to https://oauth-openshift.apps.ocp4.example.ocm/oauth/authorize...
+  # which is the graphical login screen.
+  # In order for this to work, the router pods must be running in order to redirect
+  # the request to the console pods running in the openshift-console namespace.
+  # The console pods must be running in order to redirect the request to the
+  # oauth-openshift pods running in the openshift-authentication namespace.
+  # The oauth-openshift pods must be running in order to display the login screen.
+  if ! curl -k -s $(curl -k -s https://console-openshift-console.apps.ocp4.example.com/auth/login | grep -o '"https.*"' | sed 's/"//g') | grep "Log in with kube:admin"
+  then
+    # Only display the pad2 message if the curl command fails
+    pad2 "Waiting up to 5 minutes for OAuth to be available"
+    local OAUTH_COUNT=0
+    local OAUTH_COUNT_LIMIT=30
+    local OAUTH_AVAILABLE="false"
+    while [ ${OAUTH_COUNT} -lt ${OAUTH_COUNT_LIMIT} ]
+    do
+      if curl -k -s $(curl -k -s https://console-openshift-console.apps.ocp4.example.com/auth/login | grep -o '"https.*"' | sed 's/"//g') | grep "Log in with kube:admin"
+      then
+        OAUTH_AVAILABLE="true"
+        break
+      else
+        sleep 10
+        ((OAUTH_COUNT=OAUTH_COUNT+1))
+      fi
+    done
+    if [ "${OAUTH_AVAILABLE}" == "true" ]
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    pad2 "OAuth pods are available"
+    print_SUCCESS
+  fi
+  # Wait for API to come online
+  if [ "$(curl -k -s https://api.ocp4.example.com:6443/version?timeout=10s | jq -r '.major')" != "1" ]
+  then
+    # Only display the pad2 message if the curl command fails
+    pad2 "Waiting up to 7 minutes for the API to be available"
+    local API_COUNT=0
+    local API_COUNT_LIMIT=42
+    local API_AVAILABLE="false"
+    while [ ${API_COUNT} -lt ${API_COUNT_LIMIT} ]
+    do
+      if [ "$(curl -k -s https://api.ocp4.example.com:6443/version?timeout=10s | jq -r '.major')" == "1" ]
+      then
+        API_AVAILABLE="true"
+        break
+      else
+        sleep 10
+        ((API_COUNT=API_COUNT+1))
+      fi
+    done
+    if [ "${API_AVAILABLE}" == "true" ]
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  else
+    pad2 "API pods are available"
+    print_SUCCESS
+  fi
+}
+
+
+function grab_kubeconfig {
+  if ! [ -f /root/.kubeconfig ]
+  then
+    if rsync lab@utility:/home/lab/ocp4/auth/kubeconfig /root/.kubeconfig
+    then
+      return 0
+    else
+      return 1
+    fi
+  fi
+}
+
+
+function test_ocp4_login {
+  local USER=$1
+  local PASSWORD=$2
+  local MODE=$3
+  if ! grep -w ocp /etc/passwd
+  then
+    useradd ocp -r -m -c "User to test OpenShift cluster"
+  fi
+
+  if [ -n "${USER}" -a -n "${PASSWORD}" ]
+  then
+    if /usr/bin/su - ocp -c "/usr/bin/oc login -u ${USER} -p ${PASSWORD} https://api.ocp4.example.com:6443 --insecure-skip-tls-verify"
+    then
+      if [ "${MODE,,}" == "silent" ]
+      then
+        return 0
+      else
+        pad2 "User '${USER}' can successfully log in to the cluster"
+        print_SUCCESS
+      fi
+    else
+      if [ "${MODE,,}" == "silent" ]
+      then
+        return 1
+      else
+        pad2 "User '${USER}' can successfully log in to the cluster"
+        print_FAIL
+        grab_kubeconfig
+        if [ $? -eq 0 ]
+        then
+          local SYSTEM_ADMIN="--kubeconfig=/root/.kubeconfig --insecure-skip-tls-verify"
+          local API_PROGRESSING=$(oc ${SYSTEM_ADMIN} get co/kube-apiserver -o jsonpath='{range .status.conditions[?(@.type=="Progressing")]}{.status}{end}')
+          if [ "${API_PROGRESSING,,}" == "true" ]
+          then
+            print_line
+            print_line "   User '${USER}' cannot log in because the 'kube-apiserver'"
+            print_line "   cluster operator has a status of Progressing=True."
+            print_line "   Monitor the 'kube-apiserver' cluster operator with:"
+            print_line "   $ sudo watch oc --kubeconfig=/root/.kubeconfig \\"
+            print_line "     --insecure-skip-tls-verify get co/kube-apiserver"
+          fi
+        fi
+      fi
+    fi
+  else
+    # The function was run without passing parameters for the USER and PASSWORD.
+    return 1
+  fi
+}
+
+
+function ocp4_is_cluster_up {
+
+  print_line ' Verify the OpenShift cluster is running:'
+
+  ocp4_check_api
+
+  grab_kubeconfig
+  if [ $? -eq 0 ]
+  then
+    local SYSTEM_ADMIN="--kubeconfig=/root/.kubeconfig --insecure-skip-tls-verify"
+  else
+    ocp4_login_as_admin
+  fi
+
+  for node in $(oc ${SYSTEM_ADMIN} get node -o jsonpath="{.items[*].metadata.name}" -l node-role.kubernetes.io/master); do
+    ocp4_pad "Control plane node '${node}' is ready"
+    local status=$(oc ${SYSTEM_ADMIN} get node ${node} -o jsonpath="{.status.conditions[?(@.type=='Ready')].status}")
+    if [ "${status}" = "True" ]; then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  done
+}
+
+
+function ocp4_wait {
+  local project="$1"
+  local resource="$2"
+  # optional
+  local condition="${3:-condition=available}"
+  local timeout="${4:-360s}"
+
+  oc wait "${resource}" -n "${project}" --for "${condition}" --timeout "${timeout}" &
+  local pid="$!"
+  spinner "${pid}"
+  wait "${pid}"
+}
+
+
+function ocp4_set_default_storageclass {
+  local default_storageclass="$1"
+
+  ocp4_login_as_admin
+
+  ocp4_pad "Ensure default storage class settings"
+
+  #Check for an argument?
+  if [ -z "$default_storageclass" ]; then
+    print_FAIL
+    print_line "  No storage class argument provided!"
+    return 1
+  fi
+
+  local annotation_boolean
+  if [ -z "$2" ]; then
+    annotation_boolean="true"
+  else
+    annotation_boolean="$2"
+  fi
+  # Log this for debugging; not for students
+  echo "Setting $1 storage class to default with value of: $annotation_boolean"
+
+  # Create the content of a temporary YAML file that patches
+  # the default storage class annotation.
+  tmp_yaml=$(cat <<EOF_PATCH_SC
+metadata:
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "$annotation_boolean"
+EOF_PATCH_SC
+)
+  echo "Temporary YAML:"
+  echo "$tmp_yaml"
+
+  # Use the temporary YAML to patch the storage class.
+  if oc patch storageclass "$default_storageclass" -p "$tmp_yaml"; then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+}
+
+
+function ocp4_fail_if_project_exists {
+  #varargs
+  local project="$1"
+
+  print_line ' Checking for conflicts with existing OpenShift projects:'
+  while [ "${project}" != '' ]; do
+    pad2 "The '${project}' project is absent"
+    if oc get project "${project}"
+    then
+      print_FAIL
+    else
+      print_SUCCESS
+    fi
+    shift
+    local project="$1"
+  done
+}
+
+
+function ocp4_delete_project {
+  #vararg
+  local project="$1"
+
+  while [ "${project}" != "" ]
+  do
+
+    if oc get project "${project}"
+    then
+      local project_status="$(oc get namespace ${project} -o jsonpath='{.status.phase}')"
+      # Normal projects have a status of "Active"
+      # A project which has just been deleted by a student may a status of "Terminating"
+      if [ "${project_status}" == "Active" ]
+      then
+        pad " · Delete OpenShift project '${project}'"
+        if oc delete project "${project}" --wait=true
+        then
+          print_SUCCESS
+
+          pad " · Wait for project '${project}' to be gone"
+          local RETRIES=15
+          while [ "${RETRIES}" != 0 ]; do
+            sleep 3
+            if oc get project "${project}" -o name
+            then
+              # do nothing
+              true
+            else
+              print_SUCCESS
+              break
+            fi
+            let RETRIES=RETRIES-1
+          done
+          if [ "${RETRIES}" = 0 ]; then
+            print_FAIL
+            print_line 'Too many tries, giving up'
+          fi
+
+        else
+          print_FAIL
+        fi
+      fi
+    fi
+
+    shift
+    project="$1"
+  done
+}
+
+
+function ocp4_check_http_status {
+  local status="$1"
+  local url="$2"
+  # optional
+  local timeout="${3:-${TIMEOUT}}"
+
+  #echo "*** status: ${status}"
+  #echo "*** url: ${url}"
+  curl --connect-timeout "${timeout}" -sk "${url}"
+
+  local http_status=$( curl --connect-timeout "${timeout}" -sk -o /dev/null -w '%{http_code}' "${url}" )
+  #echo "*** http_status: ${http_status}"
+  test "${http_status}" = "${status}"
+}
+
+
+#function ocp4_check_image_exists {
+#  local image="$1"
+#  # optionals
+#  local registry="${2:-${RHT_OCP4_PRIV_REGISTRY}}"
+#  local timeout="${3:-${TIMEOUT}}"
+#
+#  local name=${image%%:*}
+#  local tag=${image##*:}
+#
+#  #echo "*** image: ${image}"
+#  #echo "*** name: ${name}"
+#  #echo "*** tag: ${tag}"
+#  #echo "*** registry: ${registry}"
+#
+#  if [ "${tag}" = "" -o "${tag}" = "${name}" ]; then
+#    tag="latest"
+#  fi
+#  ocp4_check_http_status '200' "https://${registry}/v2/${name}/tags/list" "${timeout}" && \
+#  curl --connect-timeout "${timeout}" -sk "https://${registry}/v2/${name}/tags/list" | jq -e ".tags[] | select(. == \"${tag}\")"
+#}
+
+
+#function ocp4_check_git_repo_exists {
+#  local repo="$1"
+#  # optionals
+#  local git_server="${2:-${RHT_OCP4_SERVICES_VM}}"
+#  local timeout="${3:-${TIMEOUT}}"
+#
+#  ocp4_check_http_status '301' "http://${git_server}/${repo}" "${timeout}"
+#}
+
+
+function ocp4_is_latest_build_successful {
+  local project="$1"
+  local bc="$2"
+
+  local lastv=$(oc get bc "${bc}" -n "${project}" -o jsonpath='{.status.lastVersion}')
+  #echo "*** lastv: ${lastv}"
+  local phase=$(oc get build "${bc}-${lastv}" -n "${project}" -o jsonpath='{.status.phase}')
+  #echo "*** phase: ${phase}"
+  test "${phase}" = "Complete"
+}
+
+
+function ocp4_check_pod_ready_and_running {
+  local project="$1"
+  local selector="$2"
+
+  #XXX original code did not work with Kubernetes deployments; only with OpenShift dcs
+  #XXX assumes it is a single pod (scale=1)
+  local pod=$(oc get pod -l "${selector}" -n "${project}" -o name --field-selector status.phase=Running)
+  #echo "*** selector: ${selector}"
+  #echo "*** pod: ${pod}"
+  local pod_ready=$(oc get "${pod}" -n "${project}" -o jsonpath="{.status.conditions[?(@.type=='Ready')].status}")
+  #echo "*** pod ready: ${pod_ready}"
+  #XXX assumes the pod has a single container
+  local container_ready=$(oc get "${pod}" -n "${project}" -o jsonpath="{.status.containerStatuses[0].ready}")
+  #echo "*** container ready: ${container_ready}"
+  test "${pod_ready}" = "True" -a "${container_ready}" = "true"
+}
+
+
+function ocp4_check_pod_from_dc_ready_and_running {
+  local project="$1"
+  local dc="$2"
+
+  #echo "*** dc: ${dc}"
+  ocp4_check_pod_ready_and_running "${project}" "deploymentconfig=${dc}"
+}
+
+
+
+##########################################################################
+## Convenience functions: OpenShift (OUC)
+## same assumptions as the Techology functions group
+## Note: these functions loop over a vararg list and print pad messages
+##########################################################################
+
+
+function ocp4_delete_all_idp {
+  #noargs
+
+  print_line ' Restoring authentication settings to installation defaults:'
+  local changes=false
+
+  # There could be more than one HTPasswd IdP, so you can get multiple secrets
+  secret=$( oc get oauth cluster -o jsonpath="{.spec.identityProviders[?(@.type == 'HTPasswd')].htpasswd.fileData.name}" )
+  for s in "${secret}"
+  do
+    if [ "${s}" != "" ] && oc get secret "${s}" -n openshift-config -o name
+    then
+      changes=true
+      pad2 "Remove HTPasswd secret: '${s}'"
+      if oc delete secret "${s}" -n openshift-config
+      then
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+    fi
+  done
+
+  local idp=$( oc get oauth cluster -o jsonpath="{.spec.identityProviders}" )
+  if [ "${idp}" != "" -a "${idp}" != "[]" ]
+  then
+    changes=true
+    pad2 "Remove all configured Identity Providers"
+    if oc patch oauth cluster --type json -p '[{ "op": "remove", "path": "/spec/identityProviders" }]'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if [ "$(oc get user -o name)" != "" ]
+  then
+    changes=true
+    pad2 "Remove all existing users"
+    if oc delete user --all
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if [ "$(oc get group -o name)" != "" ]
+  then
+    changes=true
+    pad2 "Remove all existing groups"
+    if oc delete group --all
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if [ "$(oc get identity -o name)" != "" ]
+  then
+    changes=true
+    pad2 "Remove all existing identities"
+    if oc delete identity --all
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if ! "${changes}"
+  then
+    pad2 "No need to perform any change"
+    print_SUCCESS
+  fi
+}
+
+
+function ocp4_add_user_htpasswd {
+  #varargs
+  local user="$1"
+  local validate_users="$@"
+
+  # Set local variable to match some AWS variables that are no
+  # longer used in the OpenStack version of the classroom
+  local RHT_OCP4_USER_PASSWD="openshift"
+  local RHT_OCP4_MASTER_API="https://api.ocp4.example.com:6443"
+
+  #XXX Assumes there is only one (or zero) IdPs of type HTPasswd
+
+  # verify that the httpasswd command is available
+  if ! which htpasswd &>/dev/null
+  then
+    print_line
+    print_line "Please install the httpd-tools package"
+    exit 1
+  fi
+
+  # verify that there is no HTPasswd IdP on the CRD of the oauth operator
+  local idp=$( oc get oauth cluster -o jsonpath="{.spec.identityProviders[?(@.type == 'HTPasswd')].name}" )
+
+  local secret=""
+  local data_original="/tmp/data-original.txt"
+  local data_new="/tmp/data-new.txt"
+  touch ${data_original} ${data_new}
+  local validate_login=false
+
+  if [ -n "${idp}" ]
+  then
+    # if the HTPasswd IdP already exists, get its secret
+    secret=$( oc get oauth cluster -o jsonpath="{.spec.identityProviders[?(@.name == '${idp}')].htpasswd.fileData.name}" )
+    oc get secret "${secret}" -n openshift-config -o jsonpath="{.data.htpasswd}" | base64 -d > ${data_original}
+    cp ${data_original} ${data_new}
+  fi
+
+  # check if user can log in and update secret if apporpriate
+  while [ -n "${user}" ]
+  do
+    # only make a change for the user if you cannot currently log in as the user
+    if ! oc login -u ${user} -p ${RHT_OCP4_USER_PASSWD} ${RHT_OCP4_MASTER_API} --insecure-skip-tls-verify
+    then
+      #print_line "oc login -u ${user} -p ${RHT_OCP4_USER_PASSWD} ${RHT_OCP4_MASTER_API} --insecure-skip-tls-verify"
+      if grep -q "^${user}:" ${data_original}
+      then
+        # since the user exists in the secret, but we cannot log in, update the secret
+        pad2 "Update HTPasswd entry for '${user}'"
+        if htpasswd -b ${data_new} ${user} ${RHT_OCP4_USER_PASSWD}
+        then
+          print_SUCCESS
+        else
+          print_FAIL
+        fi
+      else
+        # since the user does not exist in the secret, create a new entry for the user
+        pad2 "Create HTPasswd entry for '${user}'"
+        if htpasswd -b ${data_new} ${user} ${RHT_OCP4_USER_PASSWD}
+        then
+          print_SUCCESS
+        else
+          print_FAIL
+        fi
+      fi
+      if [ "${user}" == "admin" ]
+      then
+        pad2 "Make 'admin' a cluster administrator"
+        if oc adm policy add-cluster-role-to-user 'cluster-admin' 'admin'
+        then
+          print_SUCCESS
+        else
+          print_FAIL
+        fi
+      fi
+    else
+      pad2 "Validate '${user}' can log in with oc"
+      print_SUCCESS
+    fi
+    shift
+    user="$1"
+  done
+
+  ocp4_login_as_admin
+
+  # if the IdP does not exist, add the IdP to the OpenShift oauth operator CRD
+  if [ -z "${idp}" ]
+  then
+    # create the secret with the htpasswd lines
+    local secret='localusers'
+    if oc get secret "${secret}" -n openshift-config -o name
+    then
+      pad2 "Remove leftover HTPasswd secret"
+      if oc delete secret "${secret}" -n openshift-config
+      then
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+    fi
+    pad2 "Create HTPasswd secret: '${secret}'"
+    if oc create secret generic "${secret}" --from-file htpasswd=${data_new} -n openshift-config
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+
+    pad2 "Add HTPasswd IdP"
+    if oc replace -f - <<EOF_ADD_IDP
+apiVersion: config.openshift.io/v1
+kind: OAuth
+metadata:
+  name: cluster
+spec:
+  identityProviders:
+  - htpasswd:
+      fileData:
+        name: ${secret}
+    mappingMethod: claim
+    name: localusers
+    type: HTPasswd
+EOF_ADD_IDP
+    then
+      print_SUCCESS
+      validate_login=true
+    else
+      print_FAIL
+    fi
+
+  else
+    # check if ${data_original} and ${data_new} are different
+    if ! diff ${data_original} ${data_new}
+    then
+      pad2 "Update the '${secret}' secret data"
+      if oc create secret generic "${secret}" --from-file htpasswd=${data_new} --dry-run -o yaml | oc replace -n openshift-config -f -
+      then
+        print_SUCCESS
+        validate_login=true
+      else
+        print_FAIL
+      fi
+    fi
+  fi
+
+  if [ ${validate_login} == "true" ]
+  then
+    validate_user_login "${validate_users}"
+  fi
+  rm -f ${data_original} ${data_new}
+  ocp4_login_as_admin
+}
+
+
+function validate_user_login {
+  local validate_users="$@"
+  source /usr/local/etc/ocp4.config
+  # check to see if oauth pods have redeployed
+  local THE_PODS=""
+  local POD_TEMPLATE_HASH="$(oc get deployment -n openshift-authentication -o jsonpath='{.items[0].status}' | grep -o "oauth-openshift-[[:alnum:]]\+" | sed 's/oauth-openshift-//')"
+  local NEW_PODS=0
+  local ATTEMPT_COUNT=0
+  #print_line "pod-template-hash=${POD_TEMPLATE_HASH}"
+  for ATTEMPT in first second
+  do
+    if [ "${ATTEMPT}" == "first" ]
+    then
+      pad2 "Pause for creation of ${ATTEMPT} ouath pod"
+      PODS_CMD="oc get pods -o name -n openshift-authentication -l pod-template-hash!=${POD_TEMPLATE_HASH}"
+      local WAIT_COUNT=0
+      local WAIT_TIMEOUT=60
+      until [ ${NEW_PODS} -gt ${ATTEMPT_COUNT} ]
+      do
+        if [ ${WAIT_COUNT} -gt ${WAIT_TIMEOUT} ]
+        then
+          # This should not take more than ${WAIT_TIMEOUT} seconds.
+          # If so, something probably got stuck in the loop,
+          # but it should be safe to break and move on.
+          break
+        else
+          sleep 1
+          NEW_PODS=$(${PODS_CMD} | wc -l)
+          ((WAIT_COUNT=WAIT_COUNT+1))
+        fi
+      done
+      print_SUCCESS
+      ((ATTEMPT_COUNT=ATTEMPT_COUNT+1))
+    else
+      pad2 "Pause for creation of ${ATTEMPT} ouath pod"
+      local WAIT_COUNT=0
+      local WAIT_TIMEOUT=60
+      until [ ${NEW_PODS} -gt ${ATTEMPT_COUNT} ]
+      do
+        if [ ${WAIT_COUNT} -gt ${WAIT_TIMEOUT} ]
+        then
+          # This should not take more than ${WAIT_TIMEOUT} seconds.
+          # If so, something probably got stuck in the loop,
+          # but it should be safe to break and move on.
+          break
+        else
+          sleep 1
+          NEW_PODS=$(oc get pods -o name -n openshift-authentication -l pod-template-hash!=${POD_TEMPLATE_HASH} | wc -l)
+          ((WAIT_COUNT=WAIT_COUNT+1))
+        fi
+      done
+      print_SUCCESS
+      PODS_CMD="oc get pods -o name -n openshift-authentication -l pod-template-hash=${POD_TEMPLATE_HASH}"
+      ((ATTEMPT_COUNT=ATTEMPT_COUNT+1))
+    fi
+
+    #print_line "${PODS_CMD}"
+    for POD in $(${PODS_CMD})
+    do
+      local pod_status=$(oc get ${POD} -n openshift-authentication -o jsonpath='{.status.phase}{"\n"}')
+      local container_status="$(oc get ${POD} -n openshift-authentication -o jsonpath='{.status.containerStatuses[0].ready}')"
+      #print_line "${POD} status=${pod_status} container=${container_status}"
+      case "${pod_status}" in
+        ContainerCreating|Pending)
+          pad2 "Wait for '${POD}'"
+          # wait until the pod is running
+          until [ "${pod_status}" == "Running" ]
+          do
+            sleep 2
+            pod_status=$(oc get ${POD} -n openshift-authentication -o jsonpath='{.status.phase}{"\n"}')
+            container_status="$(oc get ${POD} -n openshift-authentication -o jsonpath='{.status.containerStatuses[0].ready}')"
+          done
+          print_SUCCESS
+
+          pad2 "Wait for ouath pod containers to be ready"
+          # once the pod has a status of running, wait until the container is ready
+          until [ "${container_status}" == "true" ]
+          do
+            sleep 2
+            container_status="$(oc get ${POD} -n openshift-authentication -o jsonpath='{.status.containerStatuses[0].ready}')"
+          done
+          print_SUCCESS
+          POD_TEMPLATE_HASH="$(oc get ${POD} -n openshift-authentication -o jsonpath='{.metadata.labels.pod-template-hash}')"
+          ;;
+        Running)
+          container_status="$(oc get ${POD} -n openshift-authentication -o jsonpath='{.status.containerStatuses[0].ready}')"
+	  if [ "${container_status}" != "true" ]
+	  then
+            pad2 "Wait for ouath pod containers to be ready"
+            # once the pod has a status of running, wait until the container is ready
+            until [ "${container_status}" == "true" ]
+            do
+              sleep 2
+              container_status="$(oc get ${POD} -n openshift-authentication -o jsonpath='{.status.containerStatuses[0].ready}')"
+            done
+            print_SUCCESS
+            POD_TEMPLATE_HASH="$(oc get ${POD} -n openshift-authentication -o jsonpath='{.metadata.labels.pod-template-hash}')"
+	  fi
+	;;
+      esac
+    done
+  done
+
+  pad2 "Delete all previous users"
+  if oc delete users --all
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad2 "Delete all previous identities"
+  if oc delete identities --all
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  pad2 "Pause 5 seconds before validating authentication"
+  sleep 5
+  print_SUCCESS
+
+  for OCP_USER in ${validate_users}
+  do
+    pad2 "Validate '${OCP_USER}' can log in with oc"
+    if oc login -u ${OCP_USER} -p ${RHT_OCP4_USER_PASSWD} ${RHT_OCP4_MASTER_API}
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  done
+}
+
+
+function ocp4_delete_user_htpasswd {
+  #varargs
+  local user="$1"
+
+  # verify that the httpasswd command is available
+  if ! which htpasswd &>/dev/null
+  then
+    print_line
+    print_line "Please install the httpd-tools package"
+    exit 1
+  fi
+
+  # verify that there is an HTPasswd IdP on the CRD of the oauth operator
+  local idp=$( oc get oauth cluster -o jsonpath="{.spec.identityProviders[?(@.type == 'HTPasswd')].name}" )
+
+  local secret=""
+  local data=""
+
+  if [ "${idp}" = "" ]
+  then
+    # do nothing when there is no HTPasswd IdP
+    return
+  else
+    # if the HTPasswd IdP already exists, get its secret
+    secret=$( oc get oauth cluster -o jsonpath="{.spec.identityProviders[?(@.name == '${idp}')].htpasswd.fileData.name}" )
+    data=$( oc get secret "${secret}" -n openshift-config -o jsonpath="{.data.htpasswd}" | base64 -d )
+  fi
+
+  # remove htpasswd file entries from the secret's data
+  local deluser=false
+  while [ "${user}" != "" ]
+  do
+    # this pipe is safe (unlike pipes from oc) because the htpasswd file format *is* an API
+    if echo "${data}" | grep -q "^${user}:"
+    then
+      # if the secret contains an entry for the user, delete it
+      pad2 "Delete HTPasswd entry for '${user}'"
+      if data=$(echo "${data}" | sed "/^${user}:/ d")
+      then
+        deluser=true
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+    fi
+
+    shift
+    user="$1"
+  done
+
+  if "${deluser}"
+  then
+    # update the secret with the new data
+    pad2 "Update the '${secret}' secret data"
+    if local encoded=$(echo "${data}" | base64 -w0) \
+      && oc patch secret "${secret}" -n openshift-config -p "{\"data\":{\"htpasswd\":\"${encoded}\"}}"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+}
+
+
+function ocp4_delete_group {
+  #vararg
+  local group="$1"
+
+  while [ "${group}" != "" ]
+  do
+    if oc get group "${group}" -o name
+    then
+      pad2 "Remove group '${group}'"
+      if oc delete group "${group}"; then
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+    fi
+    shift
+    group="$1"
+  done
+}
+
+
+function ocp4_delete_secret {
+  #vararg
+  local secret_name="$1"
+  local desired_namespace="$2"
+  local cur_namespace=$(oc project -q)
+  local narg="--namespace=${desired_namespace:-$cur_namespace}"
+
+  if oc get secret "$secret_name" "$narg" -o name
+  then
+    pad2 "Remove the '${secret_name}' secret"
+    if oc delete secret "${secret_name}" "$narg"; then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+}
+
+
+
+function ocp4_delete_user {
+  #vararg
+  local user="$1"
+
+  while [ "${user}" != "" ]
+  do
+    if oc get user "${user}" -o name
+    then
+      pad2 "Remove user '${user}'"
+      if oc delete user "${user}"
+      then
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+    fi
+    if oc get identity "localusers:${user}" -o name
+    then
+      pad2 "Remove identity 'localusers:${user}'"
+      if oc delete identity "localusers:${user}"
+      then
+        print_SUCCESS
+      else
+        print_FAIL
+      fi
+    fi
+    shift
+    user="$1"
+  done
+}
+
+
+function ocp4_add_standard_users {
+  #noargs
+
+  #print_line " Configuring initial users:"
+  ocp4_add_user_htpasswd 'admin' 'leader' 'developer'
+}
+
+
+function ocp4_add_self_provisioing {
+  #noargs
+
+  # returns "Grop" if there is any clusterrolebinding that assings the 'self-provisioner' clusterrole to the 'system:authenticated:oauth' group
+  local hasSelfProv=$(oc get clusterrolebinding -o jsonpath="{.items[?(@.roleRef.name=='self-provisioner')].subjects[?(@.name=='system:authenticated:oauth')].kind}")
+  if [ "${hasSelfProv}" = "" ]
+  then
+    ocp4_pad "Restore project creation privileges"
+    if oc create -f - <<SELF_PROVISIONER
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  annotations:
+    rbac.authorization.kubernetes.io/autoupdate: "true"
+  name: self-provisioners
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: self-provisioner
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:authenticated:oauth
+SELF_PROVISIONER
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+}
+
+
+function ocp4_verify_prereq_images {
+  local image="$1"
+
+  while [ "${image}" != "" ]; do
+    ocp4_pad "Image '${image}' is available"
+    if ocp4_check_image_exists "${image}"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+    shift
+    local image="$1"
+  done
+}
+
+
+function ocp4_verify_prereq_git_repos {
+  local repo="$1"
+
+  while [ "${repo}" != "" ]; do
+    ocp4_pad "Git repo '${repo}' is available"
+    if ocp4_check_git_repo_exists "${repo}"
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+    shift
+    repo="$1"
+  done
+}
+
+
+function ocp4_reset_ldap_auth {
+  if oc get secret 'ldap-secret' -n openshift-config -o name
+  then
+    pad2 "Delete 'ldap-secret' secret in the 'openshift-config' project"
+    if oc delete secret 'ldap-secret' -n openshift-config
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if oc get configmap 'ca-config-map' -n openshift-config -o name
+  then
+    pad2 "Delete 'ca-config-map' configmap in the 'openshift-config' project"
+    if oc delete configmap 'ca-config-map' -n openshift-config
+        then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+  ocp4_restore_oauth
+}
+
+
+function deploy_ansible {
+  # Create a default Ansible configuration for student
+  pad2 "Modifying /etc/ansible/ansible.cfg"
+  cat > /etc/ansible/ansible.cfg <<EOF
+[defaults]
+inventory = /usr/local/lib/ansible/inventory
+gathering = false
+retry_files_enabled = False
+stdout_callback = yaml
+roles_path = /usr/local/lib/ansible/roles
+
+[privilege_escalation]
+become=True
+become_method=sudo
+become_user=root
+become_ask_pass=False
+EOF
+  if [ $? -eq 0 ]
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+  # Generate a playbook that will be used to download additional Ansible files
+  if ! [ -f /root/.deploy_ansible_files.yml ]
+  then
+    pad2 "Creating /root/.deploy_ansible_files.yml"
+    cat > /root/.deploy_ansible_files.yml <<EOF
+---
+- name: Deploy Ansible Files
+  hosts: localhost
+  connection: local
+  any_errors_fatal: true
+  gather_facts: no
+
+  tasks:
+    - name: Unarchive Ansible files
+      unarchive:
+        src: http://materials.example.com/ansible.tgz
+        dest: /usr/local/lib/
+        owner: root
+        group: root
+        remote_src: true
+EOF
+    if [ $? -eq 0 ]
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  # Run the playbook that extracts Ansible files to /usr/local/lib/ansible/.
+  # This directory is deleted on: lab --refresh
+  if ! [ -d /usr/local/lib/ansible ]
+  then
+    pad2 "Running playbook /root/.deploy_ansible_files.yml"
+    if ansible-playbook -i localhost, -l localhost /root/.deploy_ansible_files.yml
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+}
+
+
+function show_ansible {
+  local playbook="$1"
+  local playbook_options="$2"
+
+  if [ -n "${playbook}" ]
+  then
+    print_line " > Run the Ansible playbook manually as student@workstation:"
+    print_line " > \$ ansible-playbook ${playbook} ${playbook_options}"
+    print_line
+  fi
+}
+
+
+function ocp4_restore_oauth {
+  pad2 "Restore oauth"
+  if oc replace -f - <<EOF_ADD_IDP
+apiVersion: config.openshift.io/v1
+kind: OAuth
+metadata:
+  name: cluster
+spec:
+  identityProviders:
+  - htpasswd:
+      fileData:
+        name: htpasswd-secret
+    mappingMethod: claim
+    name: htpasswd_provider
+    type: HTPasswd
+EOF_ADD_IDP
+  then
+    print_SUCCESS
+    #Verify?
+  else
+    print_FAIL
+  fi
+
+  function default_htpasswd() {
+    cat <<"HTPASSWD"
+admin:$apr1$cgJuZ2cW$.ZrKT9/jlBvqXz4CI35om/
+developer:$apr1$lUQjv0x6$4giTQWKs3afvW4FAFRXBT.
+HTPASSWD
+  }
+
+  oc create secret generic htpasswd-secret --from-file=htpasswd=<(default_htpasswd) --dry-run -o yaml -n openshift-config | oc replace -f -
+}
+
+
+function ocp4_setup_ldap_oauth {
+
+  if ! oc get configmap 'ca-config-map' -n openshift-config -o name
+  then
+    pad2 "Creating configmap: ca-config-map"
+    if oc create configmap ca-config-map --from-file=ca.crt=<(curl http://idm.ocp4.example.com/ipa/config/ca.crt) -n openshift-config
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if ! oc get secret 'ldap-secret' -n openshift-config -o name
+  then
+    pad2 "Creating secret: ldap-secret"
+    if oc create secret generic ldap-secret --from-literal=bindPassword='Redhat123@!' -n openshift-config
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  local hasHtpasswd=$(oc get oauth/cluster -o=jsonpath='{.spec.identityProviders[*].htpasswd.fileData.name}')
+  if [ "${hasHtpasswd}" != "" ]
+  then
+    pad2 "Setting up LDAP IDP"
+    if oc replace -f - <<EOF_ADD_IDP
+apiVersion: config.openshift.io/v1
+kind: OAuth
+metadata:
+  name: cluster
+spec:
+  identityProviders:
+  - htpasswd:
+      fileData:
+        name: htpasswd-secret
+    mappingMethod: claim
+    name: htpasswd_provider
+    type: HTPasswd
+  - name: ldapidp
+    mappingMethod: claim
+    type: LDAP
+    ldap:
+      attributes:
+        id:
+        - dn
+        email:
+        - mail
+        name:
+        - cn
+        preferredUsername:
+        - uid
+      bindDN: "uid=admin,cn=users,cn=accounts,dc=ocp4,dc=example,dc=com"
+      bindPassword:
+        name: ldap-secret
+      ca:
+        name: ca-config-map
+      insecure: false
+      url: "ldaps://idm.ocp4.example.com/cn=users,cn=accounts,dc=ocp4,dc=example,dc=com?uid"
+EOF_ADD_IDP
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+}
+
+
+function ocp4_reset_ldap_sync {
+  if oc get cronjob 'group-sync' -o name
+  then
+    pad2 "Delete 'LDAPSyncConfig' CronJob"
+    if oc delete cronjob 'group-sync'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if oc get sa 'ldap-group-syncer' -o name
+  then
+    pad2 "Delete 'ldap-group-syncer' serviceaccount"
+    if oc delete sa 'ldap-group-syncer'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if oc get ClusterRoleBinding 'ldap-group-syncer' -o name
+  then
+    pad2 "Delete 'ldap-group-syncer' ClusterRoleBinding"
+    if oc delete ClusterRoleBinding 'ldap-group-syncer'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if oc get ClusterRole 'ldap-group-syncer' -o name
+  then
+    pad2 "Delete 'ldap-group-syncer' ClusterRole"
+    if oc delete ClusterRole 'ldap-group-syncer'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if oc get ConfigMap 'ldap-config' -o name
+  then
+    pad2 "Delete 'ldap-config' ConfigMap"
+    if oc delete ConfigMap 'ldap-config'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  if oc get Secret 'ldap-secret' -o name
+  then
+    pad2 "Delete 'ldap-secret' Secret"
+    if oc delete Secret 'ldap-secret'
+    then
+      print_SUCCESS
+    else
+      print_FAIL
+    fi
+  fi
+
+  pad2 "Deleting synced groups"
+  if oc delete group -l openshift.io/ldap.host=idm.ocp4.example.com
+  then
+    print_SUCCESS
+  else
+    print_FAIL
+  fi
+
+}
+
+function ocp4_stop_crio_service
+{
+ pad ' · Degrading worker node'
+ if grep -q '192.168.50.13' /etc/hosts
+ then
+        :
+ else
+        echo '192.168.50.13  worker01' | sudo tee -a /etc/hosts > /dev/null
+ fi
+
+ ssh core@worker01 "sudo systemctl stop crio"
+ sleep 1m
+ status_crio=$(ssh core@worker01 "sudo systemctl is-active crio")
+ if [ $status_crio == inactive -o $status_crio == failed ]
+ then
+   print_SUCCESS
+ else
+   print_FAIL
+ fi
+
+}
+
+function ocp4_start_crio_service
+{
+ pad ' · Check worker node health status'
+ status=$(ssh core@worker01 "sudo systemctl is-active crio")
+ if [ $status == active ]
+ then
+   print_SUCCESS
+ else
+   ssh core@worker01 "sudo systemctl start crio"
+   print_SUCCESS
+ fi
+}
